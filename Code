@@ -1,0 +1,319 @@
+library(tidyverse)
+library(pROC)
+library(ggplot2)
+library(cowplot)
+library(missRanger)
+library(randomForest)
+library(lubridate)
+library(ranger) #adding this random forest function due to it being faster
+library(slider)
+library(e1071)
+library(zoo)
+library(ROCR)
+library(MASS)
+library(vip)
+library(purrr)
+library(wesanderson)
+library(dygraphs)
+library(xts)
+library(tuneRanger)
+library(naniar)
+library(caret)
+library(Rmisc)
+library(gmodels)
+library(lubridate)
+setwd("/Users/rjwilliams/Dengue/Dengue Project")
+
+### resp is DENV_PCR (1 = positive, 0 = negative)
+### age has been changed to age_groups in our public data set (due to privacy concerns)
+### for the same reason, exact dates have been changed to a month/year format
+
+
+#Choose predictors for RF
+dat_clin12 <- dat %>% dplyr::select('resp', 'age', 'cough', 'nausea', 'VISIB_aggr',
+                                         'WDSP_aggr', 'RH_aggr', 'PRCP_aggr', 'TEMP_aggr.x', 'DEWPT_aggr.x', 'SLP_aggr.x',
+                                         'TEMP_aggrnolag':'WDSP_aggrnolag', 'FOI', 'primary_RS', 'secondary_RS', 'prop_in_last_30_district'
+
+)
+
+
+DENV <- data.frame(model = NA,
+                   CImin = NA,
+                   AUC = NA,
+                   CImax = NA)
+
+#VIP
+pred_fun = function(X.model, newdata) {
+  predict(X.model, newdata)$predictions[,2]
+}
+
+clinical_predictors <- c('fever',  'chills', 'malaise', 'runnynose', 'skinrash', 'sorethroat', 'seizure',
+                         'cough', 'stiffneck', 'eyepain', 'abn_move', 'nausea', 'headache', 'vomiting',
+                         'jointpain', 'loss_appet', 'musclepain', 'diarrhea', 'darkurine', 'jaundice',
+                         'abdominal', 'bleeding', 'age')
+
+non_clinical <- c('resp', "FOI", "primary_RS", "secondary_RS", "prop_in_last_30_district", 'VISIB_aggr',
+                  'WDSP_aggr', 'RH_aggr', 'PRCP_aggr', 'TEMP_aggr.x', 'DEWPT_aggr.x', 'SLP_aggr.x', 'VISIB_aggrnolag',
+                  'RH_aggrnolag', 'PRCP_aggrnolag', 'DEWPT_aggrnolag', 'SLP_aggrnolag',
+                                         'TEMP_aggrnolag', 'WDSP_aggrnolag')
+
+resp_clin_only <- c('resp')
+
+
+
+
+CI_df <- data.frame(
+  i = integer(0),
+  CImin = double(0),
+  AUC = double(0),
+  CImax = double(0)
+)
+
+### THIS IS TO DETERMINE AUC BY NUMBER OF CLINICAL VARIABLES USED, IF ONLY USING THE CLINICAL PREDICTORS (ie. NOTHING ELSE IN non_clincial)
+###THEN SUBSTITUTE resp_clin_only with non_clinical
+
+
+N=dim(dat)[1]
+CI=c()
+for(each in 1:100){
+  trn_idx = sample(1:N, .8*N)
+  train=dat[trn_idx,]
+  test=dat[-trn_idx,]
+  mod=ranger(resp~., data=train, num.trees = 1000, probability=T)
+
+  VIP <- vi(mod, method = 'permute', target = 'resp', metric = 'roc_auc', pred_wrapper= pred_fun,
+            train=train, event_level='second')
+  for(i in 2:21) {
+    selected_variables <- VIP %>%
+      filter(Variable %in% clinical_predictors) %>%
+      slice(1:i) %>%
+      pull(Variable)
+
+      train1 <- train[,c(selected_variables, non_clinical)]
+      test1 <- test[,c(selected_variables, non_clinical)]
+      mod=ranger(resp~., data=train1, num.trees = 1000, probability=T)
+      pred_train1=predict(mod,train1)$predictions[,2][which(train1$resp==1)]
+      pred_train0=predict(mod,train1)$predictions[,2][which(train1$resp==0)]
+      preds_test=predict(mod,test1)$predictions[,2]
+      CI= c(as.numeric(ci(roc(test1$resp, preds_test, plot=T))))
+
+      CI_df <- rbind(CI_df, data.frame(i = i, CImin = CI[1], AUC = CI[2], CImax = CI[3]))
+  }
+}
+
+# Averages AUCs over 100 iterations
+  averages <- CI_df %>%
+    group_by(i) %>%
+    summarize(
+      Avg_CImin = mean(CImin),
+      Avg_CImax = mean(CImax),
+      Avg_AUC = mean(AUC)
+    )
+
+
+
+
+
+
+
+### AS WE DECIDED ON 3 CLINICAL PREDICTORS, CODE IS CHANGED SLIGHTLY BELOW. TO GET DIFFERENT COMBINATIONS OF MODELS I WOULD ADD/SUBTRACT FROM non_clinical BELOW
+non_clinical <- c('resp', "FOI", "primary_RS", "secondary_RS", "prop_in_last_30_district", 'VISIB_aggr',
+                  'WDSP_aggr', 'RH_aggr', 'PRCP_aggr', 'TEMP_aggr.x', 'DEWPT_aggr.x', 'SLP_aggr.x', 'VISIB_aggrnolag',
+                  'RH_aggrnolag', 'PRCP_aggrnolag', 'DEWPT_aggrnolag', 'SLP_aggrnolag',
+                  'TEMP_aggrnolag', 'WDSP_aggrnolag')
+
+
+
+N=dim(dat)[1]
+CI=c()
+for(each in 1:100){
+  trn_idx = sample(1:N, .8*N)
+  train=dat[trn_idx,]
+  test=dat[-trn_idx,]
+  mod=ranger(resp~., data=train, num.trees = 1000, probability=T)
+
+  VIP <- vi(mod, method = 'permute', target = 'resp', metric = 'roc_auc', pred_wrapper= pred_fun,
+            train=train, event_level='second')
+
+  selected_variables <- VIP %>%
+    filter(Variable %in% clinical_predictors) %>%
+    slice(1:3) %>%
+    pull(Variable)
+
+    train1 <- train[,c(selected_variables, non_clinical)]
+    test1 <- test[,c(selected_variables, non_clinical)]
+    mod=ranger(resp~., data=train1, num.trees = 1000, probability=T)
+    pred_train1=predict(mod,train1)$predictions[,2][which(train1$resp==1)]
+    pred_train0=predict(mod,train1)$predictions[,2][which(train1$resp==0)]
+    preds_test=predict(mod,test1)$predictions[,2]
+    CI= c(as.numeric(ci(roc(test1$resp, preds_test, plot=T))))
+
+    CI_df <- rbind(CI_df, data.frame(i = i, CImin = CI[1], AUC = CI[2], CImax = CI[3]))
+
+}
+
+
+
+
+
+##### THE CODE BELOW DETERMINES SIGNIFICANCE BETWEEN MODELS
+
+
+clinical_predictors <- c('fever',  'chills', 'malaise', 'runnynose', 'skinrash', 'sorethroat', 'seizure',
+                         'cough', 'stiffneck', 'eyepain', 'abn_move', 'nausea', 'headache', 'vomiting',
+                         'jointpain', 'loss_appet', 'musclepain', 'diarrhea', 'darkurine', 'jaundice',
+                         'abdominal', 'bleeding', 'age')
+
+
+
+non_clinical <- c('resp', "FOI", "primary_RS", "secondary_RS", "prop_in_last_30_district", 'VISIB_aggr',
+                  'WDSP_aggr', 'RH_aggr', 'PRCP_aggr', 'TEMP_aggr.x', 'DEWPT_aggr.x', 'SLP_aggr.x', 'VISIB_aggrnolag',
+                  'RH_aggrnolag', 'PRCP_aggrnolag', 'DEWPT_aggrnolag', 'SLP_aggrnolag',
+                  'TEMP_aggrnolag', 'WDSP_aggrnolag')
+
+non_clinical2 <- c('resp', "FOI", "primary_RS", "secondary_RS", "prop_in_last_30_district")
+
+
+dat2 <- dat[,c(clinical_predictors, non_clinical2)]
+
+
+
+N=dim(dat)[1]
+p.value=c()
+for (each in 1:100){
+  print(each)
+  trn_idx = sample(1:N,.8*N)
+  train=dat[trn_idx,]
+  test=dat[-trn_idx,]
+  mod=ranger(resp~., data=train, num.trees = 1000, probability=T)
+
+  VIP <- vi(mod, method = 'permute', target = 'resp', metric = 'roc_auc', pred_wrapper= pred_fun,
+            train=train, event_level='second')
+
+  selected_variables <- VIP %>%
+    filter(Variable %in% clinical_predictors) %>%
+    slice(1:3) %>%
+    pull(Variable)
+
+  train1 <- train[,c(selected_variables, non_clinical)]
+  test1 <- test[,c(selected_variables, non_clinical)]
+  mod=ranger(resp~., data=train1, num.trees = 1000, probability=T)
+  pred_train1=predict(mod,train1)$predictions[,2][which(train1$resp==1)]
+  pred_train0=predict(mod,train1)$predictions[,2][which(train1$resp==0)]
+  preds_test=predict(mod,test1)$predictions[,2]
+  roc1 = roc(test1$resp,preds_test)
+
+
+  train2=dat2[trn_idx,]
+  test2=dat2[-trn_idx,]
+  mod2= ranger(resp~.,data=train2, num.trees = 1000,probability=T)
+  VIP <- vi(mod2, method = 'permute', target = 'resp', metric = 'roc_auc', pred_wrapper= pred_fun,
+            train=train2, event_level='second')
+
+  selected_variables <- VIP %>%
+    filter(Variable %in% clinical_predictors) %>%
+    slice(1:3) %>%
+    pull(Variable)
+
+  train2 <- train2[,c(selected_variables, non_clinical2)]
+  test2 <- test2[,c(selected_variables, non_clinical2)]
+  mod2=ranger(resp~., data=train2, num.trees = 1000, probability=T)
+
+
+
+  pred_train12=predict(mod2,train2)$predictions[,2][which(train2$resp==1)]
+  pred_train02=predict(mod2,train2)$predictions[,2][which(train2$resp==0)]
+  preds_test2=predict(mod2,test2)$predictions[,2]
+  roc2 = roc(test2$resp,preds_test2)
+
+
+
+  rtest <- roc.test(roc1, roc2, method = 'bootstrap')
+  p.value = rbind(p.value, c(as.numeric(rtest$p.value)))
+}
+
+mean(p.value)
+median(p.value)
+
+sum(p.value < .05)
+
+
+
+
+
+#### GETTING SENSITIVITY/SPECIFICITY/PPV/NPV METRICS
+results_df <- data.frame(
+  Sensitivity = double(),
+  Specificity = double(),
+  PPV = double(),
+  NPV = double(),
+  stringsAsFactors = FALSE
+)
+
+
+N=dim(dat)[1]
+CI=c()
+for(each in 1:100){
+  trn_idx = sample(1:N, .8*N)
+  train=dat[trn_idx,]
+  test=dat[-trn_idx,]
+  mod=ranger(resp~., data=train, num.trees = 1000, probability=T)
+
+  VIP <- vi(mod, method = 'permute', target = 'resp', metric = 'roc_auc', pred_wrapper= pred_fun,
+            train=train, event_level='second')
+
+  selected_variables <- VIP %>%
+    filter(Variable %in% clinical_predictors) %>%
+    slice(1:3) %>%
+    pull(Variable)
+
+  train1 <- train[,c(selected_variables, non_clinical)]
+  test1 <- test[,c(selected_variables, non_clinical)]
+  mod=ranger(resp~., data=train1, num.trees = 1000, probability=F)
+
+  predictions <- predict(mod, data = test1)
+  predictions <- predictions$predictions
+
+  TP <- 0
+  TN <- 0
+  FP <- 0
+  FN <- 0
+
+  # Loop through each sample in the test set
+  for (i in 1:length(predictions)) {
+    # Check if the prediction is positive (1) and the true label is also positive
+    if (predictions[i] == 1 && test$resp[i] == 1) {
+      TP <- TP + 1
+    }
+    # Check if the prediction is negative (0) and the true label is also negative
+    else if (predictions[i] == 0 && test$resp[i] == 0) {
+      TN <- TN + 1
+    }
+    # Check if the prediction is positive (1) but the true label is negative
+    else if (predictions[i] == 1 && test$resp[i] == 0) {
+      FP <- FP + 1
+    }
+    # Check if the prediction is negative (0) but the true label is positive
+    else if (predictions[i] == 0 && test$resp[i] == 1) {
+      FN <- FN + 1
+    }
+  }
+
+  Sensitivity <- TP / (TP + FN)
+  Specificity <- TN / (TN + FP)
+  PPV <- TP / (TP + FP)
+  NPV <- TN / (TN + FN)
+
+  results_df <- rbind(results_df, data.frame(
+    Sensitivity = Sensitivity,
+    Specificity = Specificity,
+    PPV = PPV,
+    NPV = NPV
+  ))
+
+}
+
+
+write.csv(results_df, 'results_df.csv')
+
+colMeans(results_df)
